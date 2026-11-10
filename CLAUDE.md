@@ -16,7 +16,7 @@ Requirements: gcc, make; for the tests lwasm (lwtools), python3 and groff.
 - `make test` (= `make check`) runs `make sim-test` and `make man-test` through `tests/run_tests.sh sim|man`. On a mismatch it prints a diff and leaves every intermediate in `build/tests/`.
 - `make install` copies both programs to `$(DESTDIR)$(BINDIR)` and `docs/man/*.1` to `$(DESTDIR)$(MANDIR)/man1`. Test it with `DESTDIR=/tmp/...`.
 - `make rpm` / `make srpm` build `sim6809.spec` from `git archive v$(VERSION)` (HEAD until the version is tagged) into `build/rpm`; `%check` runs `make test`. Check with `rpmlint` and `mock -r fedora-44-x86_64`.
-- GitHub Actions CI (`.github/workflows/ci.yml`) runs `make test` with gcc and clang in a `fedora:44` container on every PR and push to master; failing runs upload `build/tests/`. plm09's CI builds this repo's master and runs its suites with it, so a change here can break plm09's CI.
+- GitHub Actions CI (`.github/workflows/ci.yml`) runs `make test` with gcc and clang in a `fedora:44` container on every PR and push to master; failing runs upload `build/tests/`. A second job, `plm09 tests`, checks out retrotinker/plm09's master and runs its `make test` with the sim6809 and srec2flex just built, so a change that breaks plm09 fails here, on its own PR (plm09's CI also builds this repo's master).
 - `make docs` rebuilds `docs/sim6809.pdf` from `docs/sim6809.md` with pandoc + xelatex (`docs/tex/footnotehyper.sty` stands in for a missing package).
 
 **Test file conventions:**
