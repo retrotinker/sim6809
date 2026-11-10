@@ -27,3 +27,34 @@ jobs:
         with:
           name: test-outputs-${{ matrix.cc }}
           path: build/tests/
+
+  # plm09's suites, run with this sim6809 and srec2flex: plm09 tests with
+  # sim6809's master, so a change that breaks plm09 must show up here,
+  # before it is merged
+  plm09:
+    runs-on: ubuntu-latest
+    container: fedora:44
+    name: plm09 tests
+    steps:
+      - name: Install the build and test tools
+        run: dnf install -y make gcc lwtools python3 groff-base diffutils
+      - uses: actions/checkout@v7
+        with:
+          path: sim6809
+      - uses: actions/checkout@v7
+        with:
+          repository: retrotinker/plm09
+          path: plm09
+      - name: Build sim6809
+        run: |
+          make -C sim6809
+          echo "$GITHUB_WORKSPACE/sim6809/build" >> "$GITHUB_PATH"
+      # the suites that need XRoar, ROMs or disk images skip themselves
+      - name: Build plm09 and run its tests
+        run: make -C plm09 test
+      - name: Keep the test outputs if they differ
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: plm09-test-outputs
+          path: plm09/build/tests/
