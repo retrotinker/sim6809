@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 sim6809 is a headless Motorola MC6809 simulator in C11, with OS-9 and FLEX program environments and board devices, plus `srec2flex` (S-records → FLEX `.CMD`). It was split out of [plm09](https://github.com/retrotinker/plm09) (the PL/M-80 → 6809 compiler) at plm09 0.4.6, with its history; plm09's test suites run their compiled programs in it, so keep its behavior compatible (options, MMIO, exit statuses, OS-9/FLEX emulation) or change plm09 in step.
 
-**Status:** version 1.0.0 (`VERSION` in the Makefile, `Version` in `sim6809.spec`; bump both and add a `%changelog` entry together). GitHub: retrotinker/sim6809 (this repo replaced the content of an unrelated 2016 fork of Jerome Thoen's sim6809; a backup bundle of that is in `~/claude/backup/`).
+**Status:** version 1.1.0 (adds cycle counts) (`VERSION` in the Makefile, `Version` in `sim6809.spec`; bump both and add a `%changelog` entry together). GitHub: retrotinker/sim6809 (this repo replaced the content of an unrelated 2016 fork of Jerome Thoen's sim6809; a backup bundle of that is in `~/claude/backup/`).
 
 Requirements: gcc, make; for the tests lwasm (lwtools), python3 and groff.
 
@@ -20,7 +20,7 @@ Requirements: gcc, make; for the tests lwasm (lwtools), python3 and groff.
 - `make docs` rebuilds `docs/sim6809.pdf` from `docs/sim6809.md` with pandoc + xelatex (`docs/tex/footnotehyper.sty` stands in for a missing package).
 
 **Test file conventions:**
-- **sim:** `tests/X.asm` + `X.out`. The expected output is stdout followed by a last line `rc=N`. An optional first line `; SIMARGS: -n 1000` passes extra options. `os9_*.asm` are assembled with `lwasm -f os9` and run with `--os9`; `flex_*.asm` are converted by `srec2flex` and run with `--flex`. `gen_len_ops.py` generates every opcode × addressing mode; the runner checks each traced (address, bytes) pair between `LEN_BEGIN` and `LEN_END` against the lwasm listing.
+- **sim:** `tests/X.asm` + `X.out`. The expected output is stdout followed by a last line `rc=N`. An optional first line `; SIMARGS: -n 1000` passes extra options. `os9_*.asm` are assembled with `lwasm -f os9` and run with `--os9`; `flex_*.asm` are converted by `srec2flex` and run with `--flex`. `gen_len_ops.py` generates every opcode × addressing mode (with `PRAGMA 6809,c`); the runner checks each traced (address, bytes) pair between `LEN_BEGIN` and `LEN_END` against the lwasm listing, and each instruction's cycles (consecutive `CYC=` differences) against the listing's `[n]`/`[n+m]` counts, skipping lwasm's `+?` ones (the long conditional branches), which `cycles.asm` checks by hand with the MMIO counter (`MARK`/`ELAPSED` macros, 17 cycles of overhead).
 - **man:** `docs/man/{sim6809,srec2flex}.1` must format with no output from `groff -man -ww -z`, and every option `--help` lists must appear in the page as a whole word, written with `\-`.
 
 Most tests `INCLUDE harness.inc`: `TBEGIN`/`TEND` print `OK name`; `JSR CHKA` + `FCB expected`, `JSR CHKD` + `FDB expected`; table-driven `RUN8`/`RUN16`. Expected values are worked out by hand from the datasheet, so when a test fails, check the expected value as well as the simulator. LD/ST set N, Z and V, while TFR, LEAS/LEAU and PSH/PUL (except PULS CC) leave CC alone.
@@ -33,7 +33,7 @@ Every changed or added feature updates, in the same commit: `docs/sim6809.md` (a
 
 | File | Contents |
 |---|---|
-| `src/cpu6809.c`, `cpu6809.h` | the CPU core: full MC6809 instruction set, IRQ/FIRQ/NMI (`cpu_interrupt()`, called by `main.c` before each step), CWAI/SYNC, MMIO; no cycle counts |
+| `src/cpu6809.c`, `cpu6809.h` | the CPU core: full MC6809 instruction set, IRQ/FIRQ/NMI (`cpu_interrupt()`, called by `main.c` before each step), CWAI/SYNC, MMIO, cycle counts |
 | `src/os9.c`, `flex.c` | the `--os9` (system calls through `swi2_hook`) and `--flex` (DOS entry points through `pc_hook`, FLEX memory write-protected, FMS on host files) environments |
 | `src/disasm.c` | table-driven disassembler, used only by `-t` |
 | `src/srec.c` | S1/S9 and Intel HEX loader |
@@ -41,6 +41,8 @@ Every changed or added feature updates, in the same commit: `docs/sim6809.md` (a
 | `tools/srec2flex.c` | S-records → FLEX binary |
 
 Instruction lengths are decoded separately in `cpu6809.c` and `disasm.c`; the `len_ops` test keeps both in agreement with lwasm.
+
+**Cycles** (`Cpu.cycles`, `Cpu.instructions`): `cpu_step()` runs `execute()`, which leaves the instruction's cycles in `Cpu.cyc` (`base_cycles(op)`, or set by `page2`/`page3`; `ea_indexed` adds the indexed extras, PSH/PUL `stack_bytes()`, RTI +9 with E, a taken LBcc other than LBRN +1), then `add_cycles()` counts them, after the instruction, so a read of the MMIO counter sees the count at its instruction's start. `take()` adds the interrupt response (19, FIRQ 10, 7 out of CWAI); a waiting step is 1; `pc_hook` routines are free. `add_cycles()` also runs a cycle-mode timer (`timer_cycles`, `timer_left`); the instruction-mode timer still counts down at the start of each step. CWAI 20 and SYNC 4 are the datasheet minimums (lwasm lists 22+? and 2+?). `-t` lines end with `CYC=` (cycles before the instruction); `--cycles` prints totals at exit.
 
 MMIO at $FF00 by default (`--io`; `IO_*` in `cpu6809.h`):
 
@@ -52,8 +54,10 @@ MMIO at $FF00 by default (`--io`; `IO_*` in `cpu6809.h`):
 | +4/+5 | write | print the 16-bit value in decimal and a newline; the write to +5 triggers it |
 | +6 | write/read | assert interrupt lines (1 IRQ, 2 FIRQ, 4 NMI) / read the asserted lines |
 | +7 | write | release lines (IRQ and FIRQ are level-triggered) |
-| +8/+9 | write | timer period in instructions; the write to +9 starts it, 0 stops it |
+| +8/+9 | write | timer period in instructions (or cycles); the write to +9 starts it, 0 stops it |
 | +10 | write | lines the timer asserts (default IRQ) |
+| +11 | write | timer mode: 1 = the period counts cycles (it starts after the writing instruction) |
+| +12..+15 | read | cycle counter, big-endian; reading +12 latches all four |
 
 Exit status: the byte written to the exit port; 124 instruction limit; 125 illegal opcode, SWI without `--swi`, unsupported OS-9 call/FLEX entry, or memory protection violation; 2 usage or load error.
 

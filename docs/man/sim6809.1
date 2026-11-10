@@ -24,8 +24,8 @@ sim6809 \- headless Motorola 6809 simulator
 .SH DESCRIPTION
 .B sim6809
 runs a 6809 program without a display: the complete documented MC6809
-instruction set, with interrupts, and a 16-byte I/O block for character
-I/O and the exit status.
+instruction set, with interrupts and the datasheet's cycle counts, and a
+16-byte I/O block for character I/O and the exit status.
 It loads Motorola S-records (S1 and S9; S0 and S5 are ignored) and Intel
 HEX records (types 00 and 01), and starts at the S9 record's address,
 .BR \-\-entry ,
@@ -47,12 +47,17 @@ or
 .TP
 .B \-t
 Trace each instruction to standard error before it runs: its address,
-bytes, disassembly and the registers.
+bytes, disassembly, the registers and the cycles run so far
+.RB ( CYC= ).
 .TP
 .BI \-n " n"
 Stop after
 .I n
 instructions (default 100000000).
+.TP
+.B \-\-cycles
+At the end, print the number of cycles and instructions run to standard
+error.
 .TP
 .BI \-\-io " base"
 Put the I/O block at
@@ -169,11 +174,17 @@ lines
 write: release lines
 .TP
 .B +8, +9
-write: the timer period in instructions, started by the write to +9 (0
-stops it)
+write: the timer period in instructions (or cycles), started by the write
+to +9 (0 stops it)
 .TP
 .B +10
 write: the lines the timer asserts (default IRQ)
+.TP
+.B +11
+write: 1 = the timer period counts cycles, 0 = instructions (the default)
+.TP
+.B +12 to +15
+read: the cycle counter, big-endian; reading +12 latches all four bytes
 .SH EXIT STATUS
 .TP
 .B 0\-255

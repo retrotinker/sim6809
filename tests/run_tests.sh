@@ -38,6 +38,27 @@ len_pairs() {
         $2 ~ /^[0-9A-F]+$/ && $1 >= b && $1 < e { print $1, $2 }' "$1"
 }
 
+# (address, cycles) of each instruction from LEN_BEGIN up to LEN_END: from
+# an lwasm listing with PRAGMA c ($1 = listing; "[4+3]" is 7, and counts
+# lwasm can't know, "[5+?]", are left out), or from a sim6809 -t trace ($1
+# = trace; the difference between one line's CYC= and the next one's)
+cyc_listing() {
+    awk -v b="$2" -v e="$3" '$1 ~ /^[0-9A-F][0-9A-F][0-9A-F][0-9A-F]$/ &&
+        $2 ~ /^[0-9A-F]+$/ && $1 >= b && $1 < e &&
+        match($0, /\[[0-9]+(\+[0-9]+)?\]/) {
+            n = split(substr($0, RSTART + 1, RLENGTH - 2), p, "+")
+            print $1, p[1] + (n > 1 ? p[2] : 0)
+        }' "$1"
+}
+cyc_trace() {
+    awk -v b="$2" -v e="$3" '$1 ~ /^[0-9A-F][0-9A-F][0-9A-F][0-9A-F]$/ &&
+        match($0, /CYC=[0-9]+$/) {
+            c = substr($0, RSTART + 4) + 0
+            if (have && a >= b && a < e) print a, c - prev
+            a = $1; prev = c; have = 1
+        }' "$1"
+}
+
 # sim test: assemble, run, compare stdout+rc with .out.  Optional first-line
 # "; SIMARGS: ..." passes extra simulator options.  os9_*.asm files are OS-9
 # modules: assembled with -f os9 and run with --os9.  Files whose listing has
@@ -76,6 +97,14 @@ sim_one() {    # $1 = asm, $2 = expected .out
         if [ ! -s "$s19.want" ]; then bad "$name" "no instructions in listing range"; return; fi
         check_diff "$name (lengths)" "$s19.got" "$s19.want" || return
         echo "  $name: $(wc -l <"$s19.want") instructions match the lwasm listing"
+        if grep -q '^[0-9A-F]\{4\} .*\[[0-9]' "$lst"; then   # PRAGMA c
+            cyc_listing "$lst" "$b" "$e" >"$s19.cwant"
+            # only the instructions lwasm gives a fixed count for
+            cyc_trace "$s19.stderr" "$b" "$e" |
+                awk 'NR == FNR { want[$1] = 1; next } $1 in want' "$s19.cwant" - >"$s19.cgot"
+            check_diff "$name (cycles)" "$s19.cgot" "$s19.cwant" || return
+            echo "  $name: $(wc -l <"$s19.cwant") instructions take the cycles lwasm lists"
+        fi
     fi
     ok
 }
