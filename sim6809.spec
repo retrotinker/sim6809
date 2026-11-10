@@ -1,5 +1,5 @@
 Name:           sim6809
-Version:        1.1.0
+Version:        1.2.0
 Release:        1%{?dist}
 Summary:        Headless Motorola 6809 simulator with OS-9 and FLEX environments
 
@@ -49,6 +49,13 @@ make WERROR= test
 %{_mandir}/man1/srec2flex.1*
 
 %changelog
+* Tue Nov 10 2026 John W. Linville <linville@tuxdriver.com> - 1.2.0-1
+- --os9: directories as RBF has them for deleting them and finding the
+  way up: LSNs from the host's inode numbers, the start directory the
+  device's root (H0, I$GetStt SS.DevNm), I$GetStt SS.FD (the attributes),
+  I$SetStt SS.Attr, and I$Delete of a directory only with its D
+  attribute off
+
 * Tue Nov 10 2026 John W. Linville <linville@tuxdriver.com> - 1.1.0-1
 - Cycle counts, as the MC6809 datasheet gives them: CYC= in the -t trace,
   --cycles, a cycle counter at I/O +12..+15, and a timer mode counting

@@ -25,7 +25,8 @@ enum {
     I_DELETE = 0x87, I_SEEK = 0x88,
     I_READ = 0x89, I_READLN = 0x8b, I_WRITE = 0x8a, I_WRITLN = 0x8c,
     I_GETSTT = 0x8d, I_SETSTT = 0x8e, I_CLOSE = 0x8f,
-    SS_OPT = 0, SS_SIZE = 2, SS_POS = 5, SS_EOF = 6,
+    SS_OPT = 0, SS_SIZE = 2, SS_POS = 5, SS_EOF = 6, SS_DEVNM = 14, SS_FD = 15,
+    SS_ATTR = 28,
     E_PTHFUL = 0xc8,    /* path table full */
     E_BPNUM = 0xc9,     /* bad path number */
     E_BMODE = 0xcb,     /* bad mode */
@@ -39,12 +40,42 @@ enum {
 };
 
 /* The paths: 0-2 the terminal (no FILE: stdin, stdout, stderr), the rest
-   host files.  `open` is 0 for a free (or closed) path. */
+   host files.  `open` is 0 for a free (or closed) path; `st` is the host
+   file's (or directory's) status when it was opened. */
 #define NPATHS 16
 static struct {
     int open;
     FILE *f;
-} paths[NPATHS] = { { 1, NULL }, { 1, NULL }, { 1, NULL } };
+    struct stat st;
+} paths[NPATHS] = { { 1, NULL, { 0 } }, { 1, NULL, { 0 } }, { 1, NULL, { 0 } } };
+
+/* The device: the directory sim6809 starts in is its root (whose ".." is
+   itself), and its name is H0.  The host directories whose D attribute a
+   program has turned off (I$SetStt SS.Attr), as RBF's deldir does to
+   delete one: they can't be opened as directories any more, but can be
+   deleted (if empty). */
+static dev_t root_dev;
+static ino_t root_ino;
+#define NUNDIR 16
+static struct { dev_t dev; ino_t ino; } undir[NUNDIR];
+static int nundir;
+
+static int isundir(const struct stat *st)
+{
+    for (int i = 0; i < nundir; i++)
+        if (undir[i].dev == st->st_dev && undir[i].ino == st->st_ino)
+            return i;
+    return -1;
+}
+
+/* a host file's LSN, as RBF has its file descriptor's: from its inode
+   number, so that a directory's "." and its entry in its parent agree */
+static uint32_t lsn(const struct stat *st)
+{
+    uint32_t l = (uint32_t)st->st_ino & 0xffffff;
+
+    return l ? l : 0xffffff;
+}
 
 /* 24-bit module CRC: polynomial $800063, preset $FFFFFF, MSB first */
 static uint32_t crc24(const uint8_t *p, size_t n)
@@ -127,6 +158,14 @@ int os9_load(Cpu *c, const char *path, uint16_t load, uint16_t data, const char 
     c->mod_hi = (uint32_t)load + size;
     c->data_lo = data;
     c->data_hi = (uint32_t)data + total;
+    {
+        struct stat st;     /* the device's root: where it starts */
+
+        if (stat(".", &st) == 0) {
+            root_dev = st.st_dev;
+            root_ino = st.st_ino;
+        }
+    }
     return 0;
 }
 
@@ -227,8 +266,8 @@ static int byname(const void *a, const void *b)
 
 /* the host directory name as RBF has it: a file of 32-byte entries, ".."
    and "." and then the names in order, each up to 29 characters with bit
-   7 set in the last, followed by a (made up) 3-byte LSN; NULL if it can't
-   be read */
+   7 set in the last, followed by a 3-byte LSN, the file's lsn() (".."'s is
+   "."'s at the root); NULL if it can't be read */
 static FILE *dirfile(const char *name)
 {
     DIR *d = opendir(name);
@@ -256,9 +295,21 @@ static FILE *dirfile(const char *name)
         const char *s = i == 0 ? ".." : i == 1 ? "." : names[i - 2];
         uint8_t ent[32] = { 0 };
         size_t len = strlen(s) > 29 ? 29 : strlen(s);
+        char full[600];
+        struct stat st, self;
+        uint32_t l = 0;
+
         memcpy(ent, s, len);
         ent[len - 1] |= 0x80;
-        ent[31] = (uint8_t)(i + 1);     /* the LSN */
+        snprintf(full, sizeof full, "%s/%s", name, s);
+        if (i == 0 && stat(name, &self) == 0 && self.st_dev == root_dev &&
+            self.st_ino == root_ino)
+            l = lsn(&self);             /* the root's ".." is itself */
+        else if (stat(full, &st) == 0)
+            l = lsn(&st);
+        ent[29] = (uint8_t)(l >> 16);
+        ent[30] = (uint8_t)(l >> 8);
+        ent[31] = (uint8_t)l;
         fwrite(ent, 1, sizeof ent, f);
         if (i >= 2)
             free(names[i - 2]);
@@ -289,7 +340,12 @@ static int sys_open(Cpu *c, int create)
     if (c->a & 0x80) {
         if (!isdir)
             return error(c, stat(name, &st) ? E_PNNF : E_BMODE);
+        if (isundir(&st) >= 0)      /* (its D attribute is off) */
+            return error(c, E_FNA);
         if (!(f = dirfile(name)))
+            return error(c, E_FNA);
+    } else if (isdir && !create && isundir(&st) >= 0) {
+        if (!(f = tmpfile()))       /* a file now, as RBF has it: empty */
             return error(c, E_FNA);
     } else if (isdir)
         return error(c, create ? E_CEF : E_FNA);
@@ -305,6 +361,8 @@ static int sys_open(Cpu *c, int create)
         return error(c, E_PNNF);
     paths[p].open = 1;
     paths[p].f = f;
+    if (stat(name, &paths[p].st))
+        memset(&paths[p].st, 0, sizeof paths[p].st);
     c->a = (uint8_t)p;
     ok(c);
     return 0;
@@ -354,6 +412,62 @@ static int sys_stt(Cpu *c, int set)
             for (int i = 0; i < 32; i++)
                 c->mem[(uint16_t)(c->x + i)] = 0;
             c->mem[c->x] = p > 2 ? 1 : 0;
+        }
+        ok(c);
+        return 0;
+    }
+    if (!set && c->b == SS_DEVNM) {
+        /* the device's name, bit 7 set in its last character */
+        c->mem[c->x] = 'H';
+        c->mem[(uint16_t)(c->x + 1)] = '0' | 0x80;
+        ok(c);
+        return 0;
+    }
+    if (f && !set && c->b == SS_FD) {
+        /* the file descriptor, Y bytes of it (up to 256): the attributes
+           (D if a directory, and the owner's and the others' read, write
+           and execute, from the host's permissions) and the size; the
+           rest (the owner, the dates, the segments) 0 */
+        const struct stat *st = &paths[p].st;
+        uint8_t fd[256] = { 0 };
+        uint16_t n = c->y > 256 ? 256 : c->y;
+        long sz;
+
+        fd[0] = (uint8_t)((S_ISDIR(st->st_mode) && isundir(st) < 0 ? 0x80 : 0) |
+                          (st->st_mode & S_IRUSR ? 0x01 : 0) |
+                          (st->st_mode & S_IWUSR ? 0x02 : 0) |
+                          (st->st_mode & S_IXUSR ? 0x04 : 0) |
+                          (st->st_mode & S_IROTH ? 0x08 : 0) |
+                          (st->st_mode & S_IWOTH ? 0x10 : 0) |
+                          (st->st_mode & S_IXOTH ? 0x20 : 0));
+        pos = ftell(f);
+        fseek(f, 0, SEEK_END);
+        sz = ftell(f);
+        fseek(f, pos, SEEK_SET);
+        fd[9] = (uint8_t)(sz >> 24);
+        fd[10] = (uint8_t)(sz >> 16);
+        fd[11] = (uint8_t)(sz >> 8);
+        fd[12] = (uint8_t)sz;
+        for (uint16_t i = 0; i < n; i++)
+            c->mem[(uint16_t)(c->x + i)] = fd[i];
+        ok(c);
+        return 0;
+    }
+    if (f && set && c->b == SS_ATTR) {
+        /* the attributes, in X: only D matters, and only for a directory:
+           turned off, it can be deleted (and not read as a directory) */
+        const struct stat *st = &paths[p].st;
+        int i = isundir(st);
+
+        if (S_ISDIR(st->st_mode)) {
+            if (!(c->x & 0x80) && i < 0) {
+                if (nundir == NUNDIR)
+                    return error(c, E_FNA);
+                undir[nundir].dev = st->st_dev;
+                undir[nundir].ino = st->st_ino;
+                nundir++;
+            } else if ((c->x & 0x80) && i >= 0)
+                undir[i] = undir[--nundir];
         }
         ok(c);
         return 0;
@@ -436,12 +550,22 @@ static int sys_mem(Cpu *c)
     return 0;
 }
 
-/* I$Delete: the file named at X */
+/* I$Delete: the file named at X.  A directory only once its D attribute
+   is off (I$SetStt SS.Attr), and only if it's empty (RBF would delete one
+   that isn't, and lose its files); E$FNA otherwise, as RBF gives */
 static int sys_delete(Cpu *c)
 {
     char name[256];
+    struct stat st;
+    int i;
 
-    if (pathname(c, name, sizeof name) < 0 || remove(name))
+    if (pathname(c, name, sizeof name) < 0 || stat(name, &st))
+        return error(c, E_PNNF);
+    if (S_ISDIR(st.st_mode)) {
+        if ((i = isundir(&st)) < 0 || rmdir(name))
+            return error(c, E_FNA);
+        undir[i] = undir[--nundir];
+    } else if (remove(name))
         return error(c, E_PNNF);
     ok(c);
     return 0;
