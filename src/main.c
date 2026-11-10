@@ -10,6 +10,7 @@
 #include "srec.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +23,8 @@ static void usage(FILE *f)
             "usage: sim6809 [options] prog.s19\n"
             "  -t            trace each instruction to stderr\n"
             "  -n N          stop after N instructions (default 100000000)\n"
+            "  --cycles      print the cycles and instructions run to stderr at the\n"
+            "                end\n"
             "  --io BASE     MMIO base address (default $FF00)\n"
             "  --entry ADDR  start address (default: from S9 record)\n"
             "  --rom ADDR    memory from ADDR to $FFFF is ROM: writes are ignored\n"
@@ -80,7 +83,8 @@ static void dump_regs(FILE *f, const Cpu *c)
             c->a, c->b, c->x, c->y, c->u, c->s, c->dp, ccs);
 }
 
-/* one trace line: address, bytes, disassembly, registers before execution */
+/* one trace line: address, bytes, disassembly, registers and cycle count
+   before execution */
 static void trace(const Cpu *c)
 {
     char text[48], hex[16] = "";
@@ -90,7 +94,7 @@ static void trace(const Cpu *c)
         sprintf(hex + 2 * i, "%02X", c->mem[(uint16_t)(c->pc + i)]);
     fprintf(stderr, "%04X %-10s %-20s ", c->pc, hex, text);
     dump_regs(stderr, c);
-    fputc('\n', stderr);
+    fprintf(stderr, " CYC=%" PRIu64 "\n", c->cycles);
 }
 
 int main(int argc, char **argv)
@@ -99,7 +103,7 @@ int main(int argc, char **argv)
     unsigned long limit = 100000000UL, io = 0xff00, entry_opt = 0, v;
     unsigned long load = 0x2000, data = 0x8000;
     int tracing = 0, have_entry_opt = 0, has_entry, os9 = 0, flex = 0, ft245 = 0, swi = 0;
-    int acia = 0, stop_at_end = 0, reset = 0, rom = 0;
+    int acia = 0, stop_at_end = 0, reset = 0, rom = 0, cycles = 0;
     unsigned long rom_addr = 0;
     unsigned long ft245_addr = 0, acia_addr = 0;
     const char *params = "";
@@ -117,6 +121,8 @@ int main(int argc, char **argv)
             return 0;
         } else if (!strcmp(a, "-t")) {
             tracing = 1;
+        } else if (!strcmp(a, "--cycles")) {
+            cycles = 1;
         } else if (!strcmp(a, "--zero")) {
             fill = 0;
         } else if (!strcmp(a, "--os9")) {
@@ -222,6 +228,9 @@ int main(int argc, char **argv)
             break;
     }
     fflush(stdout);
+    if (cycles)
+        fprintf(stderr, "sim6809: %" PRIu64 " cycles, %" PRIu64 " instructions\n",
+                cpu.cycles, cpu.instructions);
 
     switch (cpu.stop) {
     case STOP_EXIT:

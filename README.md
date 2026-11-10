@@ -18,6 +18,9 @@ Features:
   status, interrupt lines and a timer)
 - an optional per-instruction trace with disassembly and registers, and an
   instruction limit
+- cycle counts as the datasheet gives them (agreeing with lwasm's listing):
+  in the trace, as a total (`--cycles`), and as a counter and a cycle timer
+  in the I/O block
 - an OS-9 mode that runs a program module with the basic I/O system calls
   on the terminal and host files, and memory protection
 - a FLEX mode that runs a `.CMD` file with FLEX's DOS entry points and File

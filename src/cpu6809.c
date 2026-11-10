@@ -1,7 +1,8 @@
 /* MC6809 CPU core for sim6809.
  *
  * Full documented 6809 instruction set and addressing modes, and IRQ, FIRQ
- * and NMI driven through MMIO.  No cycle counting.  SWI/SWI2/SWI3 stop the
+ * and NMI driven through MMIO.  Cycles are counted as the MC6809 datasheet
+ * gives them (no bus-level timing).  SWI/SWI2/SWI3 stop the
  * simulator (STOP_TRAP),
  * except that SWI2 calls swi2_hook when one is set (OS-9 system calls);
  * undocumented opcodes and indexed postbytes stop it (STOP_ILLEGAL).
@@ -86,6 +87,13 @@ uint8_t cpu_read8(Cpu *c, uint16_t addr)
         }
         if (addr - c->io_base == IO_INTSET)
             return c->lines;
+        if (addr - c->io_base >= IO_CYCLES) {
+            int i = addr - c->io_base - IO_CYCLES;
+            if (i == 0)                 /* latch the counter, low 32 bits */
+                for (int k = 0; k < 4; k++)
+                    c->cyc_latch[k] = (uint8_t)(c->cycles >> (24 - 8 * k));
+            return c->cyc_latch[i];
+        }
         return 0;
     }
     return c->mem[addr];
@@ -146,9 +154,15 @@ void cpu_write8(Cpu *c, uint16_t addr, uint8_t v)
         break;
     case IO_TIMLO:
         c->timer_period = c->timer_count = (uint16_t)(c->tim_hi << 8 | v);
+        /* in cycles, the period starts after this instruction: its
+           cycles (all counted by the time it writes) are added back */
+        c->timer_left = (int32_t)(c->timer_period + c->cyc);
         break;
     case IO_TIMLINE:
         c->timer_lines = v & (INT_IRQ | INT_FIRQ | INT_NMI);
+        break;
+    case IO_TIMMODE:
+        c->timer_cycles = v & TIM_CYCLES;
         break;
     }
 }
@@ -326,8 +340,13 @@ static uint16_t ea_indexed(Cpu *c)
 
     if (!(pb & 0x80)) {                 /* 5-bit signed offset */
         int off = (pb & 0x10) ? (pb & 0x1f) - 32 : (pb & 0x1f);
+        c->cyc += 1;
         return (uint16_t)(*r + off);
     }
+    /* the indexed modes' extra cycles, by the low nibble; indirection adds
+       3 more, except to [n16] (extended indirect), which is 5 in all */
+    static const uint8_t extra[16] = { 2, 3, 2, 3, 0, 1, 1, 0, 1, 4, 0, 4, 1, 5, 0, 2 };
+    c->cyc += extra[pb & 0x0f] + (ind ? 3 : 0);
     switch (pb & 0x0f) {
     case 0x0:
         if (ind)
@@ -449,6 +468,16 @@ static void op_exg(Cpu *c, uint8_t pb)
     uint16_t v1 = reg_for(c, r1, r2), v2 = reg_for(c, r2, r1);
     set_reg(c, r2, v1);
     set_reg(c, r1, v2);
+}
+
+/* the cycles PSHS/PULS/PSHU/PULU take beyond 5: one per byte moved */
+static unsigned stack_bytes(uint8_t pb)
+{
+    unsigned n = 0;
+    for (int i = 0; i < 8; i++)
+        if (pb & (1 << i))
+            n += i < 4 ? 1 : 2;
+    return n;
 }
 
 /* PSHS/PSHU: sp is the stack being pushed, other is the "other" stack reg */
@@ -685,11 +714,16 @@ static int page2(Cpu *c)
 
     if (op >= 0x20 && op <= 0x2f) {     /* long conditional branches */
         uint16_t off = fetch16(c);
-        if (cond(c, op & 0xf))
+        c->cyc = 5;
+        if (cond(c, op & 0xf)) {
             c->pc = (uint16_t)(c->pc + off);
+            if ((op & 0xf) != 0x1)      /* LBRN never takes the extra cycle */
+                c->cyc = 6;
+        }
         return 0;
     }
     if (op == 0x3f) {
+        c->cyc = 20;
         if (c->swi2_hook)
             return c->swi2_hook(c);
         if (c->swi)
@@ -707,6 +741,8 @@ static int page2(Cpu *c)
         return cpu_stop(c, STOP_ILLEGAL, "illegal opcode");
     if (mode == 0 && store)
         return cpu_stop(c, STOP_ILLEGAL, "illegal opcode (store immediate)");
+    /* CMPD/CMPY 5 7 7 8, LDY/STY/LDS/STS 4 6 6 7 (imm, dir, idx, ext) */
+    c->cyc = (uint8_t)((n == 0x3 || n == 0xc ? 5 : 4) + (mode ? 2 : 0) + (mode == 3));
 
     if (mode == 0) {
         m16 = fetch16(c);
@@ -744,10 +780,13 @@ static int page3(Cpu *c)
     int mode = (op >> 4) & 3;
     uint16_t m16;
 
-    if (op == 0x3f)
+    if (op == 0x3f) {
+        c->cyc = 20;
         return c->swi ? software_interrupt(c, 0, 0xfff2) : cpu_stop(c, STOP_TRAP, "SWI3");
+    }
     if (op < 0x80 || op >= 0xc0 || ((op & 0x0f) != 0x3 && (op & 0x0f) != 0xc))
         return cpu_stop(c, STOP_ILLEGAL, "illegal opcode");
+    c->cyc = (uint8_t)(5 + (mode ? 2 : 0) + (mode == 3));     /* CMPU/CMPS */
     if (mode == 0) {
         m16 = fetch16(c);
     } else {
@@ -779,10 +818,64 @@ static void op_daa(Cpu *c)
     setf(c, CC_V, 0);
 }
 
+/* ---------------------------------------------------------------- cycles */
+
+/* the timer's period has passed: assert its lines */
+static void timer_fire(Cpu *c)
+{
+    c->lines |= c->timer_lines & (INT_IRQ | INT_FIRQ);
+    if (c->timer_lines & INT_NMI)
+        c->nmi_pending = 1;
+}
+
+/* n cycles have passed (counted, and run down a cycle timer) */
+static void add_cycles(Cpu *c, unsigned n)
+{
+    c->cycles += n;
+    if (c->timer_period && c->timer_cycles) {
+        c->timer_left -= (int32_t)n;
+        while (c->timer_left <= 0) {
+            c->timer_left += c->timer_period;
+            timer_fire(c);
+        }
+    }
+}
+
+/* an unprefixed opcode's cycles, before the indexed modes' extra cycles,
+   PSH/PUL's bytes and RTI's E (0 for the $10/$11 prefixes and illegal
+   opcodes) */
+static unsigned base_cycles(int op)
+{
+    static const uint8_t misc[0x40] = {
+        6, 0, 0, 6, 6, 0, 6, 6, 6, 6, 6, 0, 6, 6, 3, 6,         /* $0x direct */
+        0, 0, 2, 4, 0, 0, 5, 9, 0, 2, 3, 0, 3, 2, 8, 6,         /* $1x */
+        3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,         /* $2x Bcc */
+        4, 4, 4, 4, 5, 5, 5, 5, 0, 5, 3, 6, 20, 11, 0, 19,      /* $3x */
+    };
+    int n = op & 0x0f, mode = (op >> 4) & 3;
+
+    if (op < 0x40)
+        return misc[op];
+    if (op < 0x60)
+        return 2;                       /* inherent A/B */
+    if (op < 0x80)                      /* indexed / extended: JMP or RMW */
+        return (n == 0xe ? 3 : 6) + (op >= 0x70);
+    if (op < 0xc0 && n == 0xd)          /* BSR, JSR */
+        return mode == 0 ? 7 : mode == 3 ? 8 : 7;
+    /* imm, dir, idx, ext: 2 4 4 5 for 8-bit operands; SUBD/ADDD/CMPX
+       4 6 6 7; LDD/STD/LDX/STX/LDU/STU 3 5 5 6 */
+    unsigned b = n == 0x3 || (n == 0xc && op < 0xc0) ? 4
+               : n >= 0xc || n == 0xe || n == 0xf ? 3 : 2;
+    return b + (mode ? 2 : 0) + (mode == 3);
+}
+
 /* stack the state and jump through a vector */
 static void take(Cpu *c, int entire, uint8_t mask, uint16_t vector)
 {
-    if (c->waiting != 1) {              /* CWAI stacked it already */
+    /* the response: 19 cycles (IRQ, NMI) or 10 (FIRQ), but 7 out of CWAI,
+       which stacked the state already */
+    add_cycles(c, c->waiting == 1 ? 7 : entire ? 19 : 10);
+    if (c->waiting != 1) {
         if (entire)
             c->cc |= CC_E;
         else
@@ -830,31 +923,46 @@ int cpu_interrupt(Cpu *c)
     return TOOK_NONE;
 }
 
+static int execute(Cpu *c);
+
 int cpu_step(Cpu *c)
 {
-    uint8_t r;
-    int op;
+    int r;
 
     if (c->stop)
         return c->stop;
-    if (c->timer_period && --c->timer_count == 0) {
+    if (c->timer_period && !c->timer_cycles && --c->timer_count == 0) {
         c->timer_count = c->timer_period;
-        c->lines |= c->timer_lines & (INT_IRQ | INT_FIRQ);
-        if (c->timer_lines & INT_NMI)
-            c->nmi_pending = 1;
+        timer_fire(c);
     }
-    if (c->waiting)
+    if (c->waiting) {
+        add_cycles(c, 1);
         return 0;
-    if (c->pc_hook) {
+    }
+    if (c->pc_hook) {                   /* an emulated routine takes no time */
         c->stop_pc = c->pc;
-        int r = c->pc_hook(c);
+        r = c->pc_hook(c);
         if (r >= 0)
             return r;
     }
     c->stop_pc = c->pc;
     if (c->protect && !in(c->pc, c->mod_lo, c->mod_hi))
         return cpu_stop(c, STOP_ILLEGAL, "PC outside the module");
+    c->cyc = 0;
+    r = execute(c);
+    c->instructions++;
+    add_cycles(c, c->cyc);
+    return r;
+}
+
+/* one instruction at c->pc; its cycles in c->cyc */
+static int execute(Cpu *c)
+{
+    uint8_t r;
+    int op;
+
     op = fetch8(c);
+    c->cyc = base_cycles(op);
 
     if (op < 0x10 || (op >= 0x60 && op < 0x80))
         return mem_unary(c, op);
@@ -917,16 +1025,30 @@ int cpu_step(Cpu *c)
         *(op == 0x32 ? &c->s : &c->u) = ea;
         return 0;
     }
-    case 0x34: op_psh(c, &c->s, c->u, fetch8(c)); return c->stop;
-    case 0x35: op_pul(c, &c->s, &c->u, fetch8(c)); return c->stop;
-    case 0x36: op_psh(c, &c->u, c->s, fetch8(c)); return c->stop;
-    case 0x37: op_pul(c, &c->u, &c->s, fetch8(c)); return c->stop;
+    case 0x34:                                                  /* PSHS */
+    case 0x35:                                                  /* PULS */
+    case 0x36:                                                  /* PSHU */
+    case 0x37: {                                                /* PULU */
+        uint8_t pb = fetch8(c);
+        c->cyc += stack_bytes(pb);
+        if (op == 0x34)
+            op_psh(c, &c->s, c->u, pb);
+        else if (op == 0x35)
+            op_pul(c, &c->s, &c->u, pb);
+        else if (op == 0x36)
+            op_psh(c, &c->u, c->s, pb);
+        else
+            op_pul(c, &c->u, &c->s, pb);
+        return c->stop;
+    }
     case 0x39: c->pc = pull16(c, &c->s); return c->stop;        /* RTS */
     case 0x3a: c->x = (uint16_t)(c->x + c->b); return 0;        /* ABX */
     case 0x3b:                                                  /* RTI */
         c->cc = pull8(c, &c->s);
-        if (c->cc & CC_E)
+        if (c->cc & CC_E) {
             op_pul(c, &c->s, &c->u, 0x7e);
+            c->cyc += 9;                /* 15 in all */
+        }
         c->pc = pull16(c, &c->s);
         return c->stop;
     case 0x3c:                                                  /* CWAI */

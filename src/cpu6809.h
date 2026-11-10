@@ -1,4 +1,4 @@
-/* MC6809 CPU core for sim6809 (IRQ, FIRQ and NMI from MMIO; no cycle counting) */
+/* MC6809 CPU core for sim6809 (IRQ, FIRQ and NMI from MMIO; cycle counts) */
 #ifndef CPU6809_H
 #define CPU6809_H
 
@@ -23,13 +23,19 @@ enum {
     IO_PUTCH = 0, IO_GETCH = 1, IO_EXIT = 2, IO_DECHI = 4, IO_DECLO = 5,
     IO_INTSET = 6,      /* write: assert lines (INT_*); read: lines asserted */
     IO_INTCLR = 7,      /* write: release lines */
-    IO_TIMHI = 8, IO_TIMLO = 9,     /* timer period in instructions; the
-                                       write to +9 starts it (0 stops it) */
+    IO_TIMHI = 8, IO_TIMLO = 9,     /* timer period in instructions (or
+                                       cycles); the write to +9 starts it
+                                       (0 stops it) */
     IO_TIMLINE = 10,    /* write: the lines the timer asserts (default IRQ) */
+    IO_TIMMODE = 11,    /* write: TIM_CYCLES = the period counts cycles */
+    IO_CYCLES = 12,     /* read +12..+15: the cycle counter, big-endian; the
+                           read of +12 latches all four bytes */
     IO_SIZE = 16
 };
 
 enum { ACIA_IDLE = 32 };
+
+enum { TIM_CYCLES = 1 };
 
 /* interrupt lines, as bits of IO_INTSET / IO_INTCLR */
 enum { INT_IRQ = 1, INT_FIRQ = 2, INT_NMI = 4 };
@@ -53,7 +59,16 @@ typedef struct Cpu {
     uint8_t tim_hi;
     uint16_t timer_period, timer_count;
     uint8_t timer_lines;
+    int timer_cycles;       /* IO_TIMMODE: the period counts cycles */
+    int32_t timer_left;     /* cycles until the timer fires */
     int waiting;            /* 1 = in CWAI (state stacked), 2 = in SYNC */
+
+    /* cycles, as the MC6809 datasheet counts them: completed before the
+       current instruction (an interrupt's response and a step spent waiting
+       in CWAI or SYNC count too); instructions executed */
+    uint64_t cycles, instructions;
+    unsigned cyc;           /* the current instruction's cycles so far */
+    uint8_t cyc_latch[4];   /* IO_CYCLES, latched by the read of +12 */
 
     int stop;               /* STOP_* */
     int exit_code;
@@ -111,7 +126,7 @@ void cpu_init(Cpu *c, uint16_t io_base, uint8_t fill);
 /* stop the CPU with reason why (STOP_*) and message; returns why */
 int cpu_stop(Cpu *c, int why, const char *msg);
 /* execute one instruction; returns c->stop.  While the CPU waits in CWAI
-   or SYNC, a step only counts time. */
+   or SYNC, a step only counts time (one cycle). */
 int cpu_step(Cpu *c);
 /* take a pending, unmasked interrupt (call before cpu_step); returns TOOK_* */
 int cpu_interrupt(Cpu *c);

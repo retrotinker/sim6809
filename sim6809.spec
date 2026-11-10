@@ -1,5 +1,5 @@
 Name:           sim6809
-Version:        1.0.0
+Version:        1.1.0
 Release:        1%{?dist}
 Summary:        Headless Motorola 6809 simulator with OS-9 and FLEX environments
 
@@ -49,5 +49,10 @@ make WERROR= test
 %{_mandir}/man1/srec2flex.1*
 
 %changelog
+* Tue Nov 10 2026 John W. Linville <linville@tuxdriver.com> - 1.1.0-1
+- Cycle counts, as the MC6809 datasheet gives them: CYC= in the -t trace,
+  --cycles, a cycle counter at I/O +12..+15, and a timer mode counting
+  cycles (I/O +11)
+
 * Tue Nov 10 2026 John W. Linville <linville@tuxdriver.com> - 1.0.0-1
 - First package, split out of plm09 0.4.6
