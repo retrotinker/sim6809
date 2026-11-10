@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Fedora, as the RPM is built for, with lwtools from its repositories
+    container: fedora:44
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    name: check (${{ matrix.cc }})
+    steps:
+      - name: Install the build and test tools
+        run: dnf install -y make ${{ matrix.cc }} lwtools python3 groff-base diffutils
+      - uses: actions/checkout@v7
+      - name: Build and run the tests
+        run: make CC=${{ matrix.cc }} test
+      - name: Keep the test outputs if they differ
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-outputs-${{ matrix.cc }}
+          path: build/tests/
