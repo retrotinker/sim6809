@@ -47,7 +47,7 @@ int main(int argc, char **argv)
     FILE *in, *out;
 
     if (argc == 2 && !strcmp(argv[1], "--version")) {
-        printf("srec2flex (plm09) %s\n", PLM09_VERSION);
+        printf("srec2flex (sim6809) %s\n", SIM6809_VERSION);
         return 0;
     }
     if (argc == 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {

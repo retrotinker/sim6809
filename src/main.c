@@ -1,4 +1,4 @@
-/* sim6809: headless MC6809 simulator for plm09 tests -- driver
+/* sim6809: headless MC6809 simulator -- driver
  *
  * Exit status: the byte the program wrote to the MMIO exit port,
  * 124 if the instruction limit was reached, 125 on an illegal opcode or
@@ -113,7 +113,7 @@ int main(int argc, char **argv)
             usage(stdout);
             return 0;
         } else if (!strcmp(a, "--version")) {
-            printf("%s (plm09) %s\n", "sim6809", PLM09_VERSION);
+            printf("sim6809 %s\n", SIM6809_VERSION);
             return 0;
         } else if (!strcmp(a, "-t")) {
             tracing = 1;

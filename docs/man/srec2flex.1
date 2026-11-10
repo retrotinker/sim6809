@@ -1,4 +1,4 @@
-.TH SREC2FLEX 1 2026-10-26 plm09 "plm09 Manual"
+.TH SREC2FLEX 1 2026-11-10 sim6809 "sim6809 Manual"
 .SH NAME
 srec2flex \- convert S-records to a FLEX binary (.CMD) file
 .SH SYNOPSIS
@@ -44,7 +44,8 @@ S7, S8) or no S9 record.
 .B 2
 A usage error, or a file that couldn't be read or written.
 .SH EXAMPLES
-Build a FLEX command from a PL/M program:
+Build a FLEX command from a PL/M program with plm09's
+.BR plmc (1):
 .PP
 .RS
 .EX
@@ -60,6 +61,8 @@ Then copy HELLO.CMD to a FLEX disk, or run it with
 .BR plmc (1),
 .BR sim6809 (1)
 .PP
-The FLEX section of the plmc manual,
+The FLEX mode section of the sim6809 manual,
+.I docs/sim6809.pdf
+in the sim6809 source tree, and the FLEX section of the plmc manual,
 .I docs/plmc.pdf
 in the plm09 source tree.
