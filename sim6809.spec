@@ -1,5 +1,5 @@
 Name:           sim6809
-Version:        1.2.0
+Version:        1.3.0
 Release:        1%{?dist}
 Summary:        Headless Motorola 6809 simulator with OS-9 and FLEX environments
 
@@ -49,6 +49,12 @@ make WERROR= test
 %{_mandir}/man1/srec2flex.1*
 
 %changelog
+* Thu Nov 12 2026 John W. Linville <linville@tuxdriver.com> - 1.3.0-1
+- --os9: a directory opened for update (DIR. + UPDAT.), and a new name
+  written over a file's entry in it, as RBF's rename does, renames the
+  host file (for bcc09's rename()); any other write to a directory is
+  E$Write
+
 * Tue Nov 10 2026 John W. Linville <linville@tuxdriver.com> - 1.2.0-1
 - --os9: directories as RBF has them for deleting them and finding the
   way up: LSNs from the host's inode numbers, the start directory the

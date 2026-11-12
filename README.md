@@ -22,7 +22,9 @@ Features:
   in the trace, as a total (`--cycles`), and as a counter and a cycle timer
   in the I/O block
 - an OS-9 mode that runs a program module with the basic I/O system calls
-  on the terminal and host files, and memory protection
+  on the terminal and host files, directories as RBF has them (made, read,
+  deleted, and renamed in by writing an entry, as RBF's `rename` does),
+  and memory protection
 - a FLEX mode that runs a `.CMD` file with FLEX's DOS entry points and File
   Management System on host files
 - board devices: an MC6850 ACIA, an FT245RL USB FIFO, working `SWI`, ROM

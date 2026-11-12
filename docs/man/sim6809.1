@@ -86,7 +86,9 @@ Set up a process as F$Fork does, emulate the system calls F$Exit and
 F$Mem, I$Read, I$ReadLn, I$Write and I$WritLn on the terminal (paths
 0, 1 and 2) and on files, and I$Open, I$Create, I$Close, I$Seek, I$GetStt,
 I$SetStt, I$Delete, I$MakDir and I$ChgDir on host files and
-directories, named relative to the current directory; and
+directories, named relative to the current directory (a new name
+written over an entry in a directory opened for update renames the
+file, as RBF's rename does); and
 enforce memory protection: code must stay in the module, and writes in
 the data area.
 .TP

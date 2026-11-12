@@ -41,13 +41,18 @@ enum {
 
 /* The paths: 0-2 the terminal (no FILE: stdin, stdout, stderr), the rest
    host files.  `open` is 0 for a free (or closed) path; `st` is the host
-   file's (or directory's) status when it was opened. */
+   file's (or directory's) status when it was opened; `dir` is a directory
+   path's host name (NULL for a file), and `update` 1 if it was opened for
+   update (DIR. + UPDAT.), to rename its files by writing their entries. */
 #define NPATHS 16
 static struct {
     int open;
     FILE *f;
     struct stat st;
-} paths[NPATHS] = { { 1, NULL, { 0 } }, { 1, NULL, { 0 } }, { 1, NULL, { 0 } } };
+    char *dir;
+    int update;
+} paths[NPATHS] = { { 1, NULL, { 0 }, NULL, 0 }, { 1, NULL, { 0 }, NULL, 0 },
+                    { 1, NULL, { 0 }, NULL, 0 } };
 
 /* The device: the directory sim6809 starts in is its root (whose ".." is
    itself), and its name is H0.  The host directories whose D attribute a
@@ -187,6 +192,78 @@ static int path(Cpu *c)
     return c->a < NPATHS && paths[c->a].open ? c->a : -1;
 }
 
+/* an entry's name (up to 29 characters, the last with bit 7 set) into
+   name; 0, or -1 if it has none (bit 7 in none of them) */
+static int entname(const uint8_t *ent, char *name)
+{
+    for (int i = 0; i < 29; i++) {
+        name[i] = (char)(ent[i] & 0x7f);
+        if (ent[i] & 0x80) {
+            name[i + 1] = '\0';
+            return name[0] ? 0 : -1;
+        }
+    }
+    return -1;
+}
+
+/* a write to directory path p (opened for update): what RBF's rename does,
+   writing a new name over an entry's old one, renames the host file; any
+   other change (an entry's LSN, "..", ".", a deleted entry, past the end)
+   is E$Write, and the host and the path's copy stay as they were */
+static int dirwrite(Cpu *c, int p)
+{
+    FILE *f = paths[p].f;
+    long pos = ftell(f), first, last, e, end;
+    uint16_t n = c->y;
+    uint8_t old[32], new[32];
+    char oname[32], nname[32], from[600], to[600];
+    struct stat st;
+    int pass;
+
+    if (!paths[p].update)
+        return error(c, E_BMODE);
+    if (n == 0) {
+        ok(c);
+        return 0;
+    }
+    fseek(f, 0, SEEK_END);
+    end = ftell(f);
+    first = pos / 32;
+    last = (pos + n - 1) / 32;
+    if (pos + n > end)
+        return error(c, E_WRITE);
+    /* (two passes: check every entry, then rename) */
+    for (pass = 0; pass < 2; pass++)
+        for (e = first; e <= last; e++) {
+            fseek(f, e * 32, SEEK_SET);
+            if (fread(old, 1, 32, f) != 32)
+                return error(c, E_WRITE);
+            memcpy(new, old, 32);
+            for (long i = 0; i < 32; i++) {
+                long at = e * 32 + i;
+                if (at >= pos && at < pos + n)
+                    new[i] = c->mem[(uint16_t)(c->x + (at - pos))];
+            }
+            if (!memcmp(old, new, 32))
+                continue;
+            if (e < 2 || old[0] == 0 || memcmp(old + 29, new + 29, 3) ||
+                entname(old, oname) < 0 || entname(new, nname) < 0 ||
+                strchr(nname, '/'))
+                return error(c, E_WRITE);
+            snprintf(from, sizeof from, "%s/%s", paths[p].dir, oname);
+            snprintf(to, sizeof to, "%s/%s", paths[p].dir, nname);
+            if (pass == 0 && strcmp(oname, nname) && stat(to, &st) == 0)
+                return error(c, E_CEF);
+            if (pass == 1 && strcmp(oname, nname) && rename(from, to))
+                return error(c, E_WRITE);
+        }
+    fseek(f, pos, SEEK_SET);
+    for (uint16_t i = 0; i < n; i++)
+        fputc(c->mem[(uint16_t)(c->x + i)], f);
+    ok(c);
+    return 0;
+}
+
 static int sys_write(Cpu *c, int line)
 {
     int p = path(c);
@@ -195,6 +272,8 @@ static int sys_write(Cpu *c, int line)
 
     if (!f)
         return error(c, E_BPNUM);
+    if (p > 2 && paths[p].dir)
+        return dirwrite(c, p);
     if (f == stderr)    /* (in order, when both go to one file) */
         fflush(stdout);
     while (n < c->y) {
@@ -320,7 +399,8 @@ static FILE *dirfile(const char *name)
 }
 
 /* I$Open (create 0) or I$Create (1): mode A (1 read, 2 write, 3 both; +
-   $80, DIR., to read a directory), the path name at X; the new path in A */
+   $80, DIR., to read a directory, or with 3 to update it: see dirwrite()),
+   the path name at X; the new path in A */
 static int sys_open(Cpu *c, int create)
 {
     char name[256];
@@ -328,7 +408,7 @@ static int sys_open(Cpu *c, int create)
     FILE *f;
     int p, mode = c->a & 3, isdir;
 
-    if (mode == 0 || ((c->a & 0x80) && (create || mode != 1)))
+    if (mode == 0 || ((c->a & 0x80) && (create || mode == 2)))
         return error(c, E_BMODE);
     if (pathname(c, name, sizeof name) < 0)
         return error(c, E_PNNF);
@@ -361,6 +441,13 @@ static int sys_open(Cpu *c, int create)
         return error(c, E_PNNF);
     paths[p].open = 1;
     paths[p].f = f;
+    paths[p].dir = NULL;
+    paths[p].update = 0;
+    if (c->a & 0x80) {
+        if (!(paths[p].dir = strdup(name)))
+            exit(2);
+        paths[p].update = mode == 3;
+    }
     if (stat(name, &paths[p].st))
         memset(&paths[p].st, 0, sizeof paths[p].st);
     c->a = (uint8_t)p;
@@ -376,8 +463,10 @@ static int sys_close(Cpu *c)
         return error(c, E_BPNUM);
     if (paths[p].f)
         fclose(paths[p].f);
+    free(paths[p].dir);
     paths[p].open = 0;
     paths[p].f = NULL;
+    paths[p].dir = NULL;
     ok(c);
     return 0;
 }
